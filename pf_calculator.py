@@ -2,23 +2,24 @@ import streamlit as st
 import pandas as pd
 from fpdf import FPDF
 from io import BytesIO
+import math
 
 # --- Page Configuration ---
-st.set_page_config(page_title="PF Ledger (1997 Match)", layout="wide")
+st.set_page_config(page_title="PF Ledger (Split PFLR)", layout="wide")
 
-st.title("💰 Provident Fund Ledger (1997 Reference Match)")
+st.title("💰 Provident Fund Ledger (Split PFLR Mode)")
 st.markdown("""
-**Configuration to match 'old PF LEDGER - Copy.pdf':**
-1.  **September Fix:** Includes a hidden **3,000 Arrear** (Deposit > 15th) to force the Closing Balance jump.
-2.  **October Fix:** Ignores the "250" PFLR because the manual ledger's Closing Balance didn't change.
-3.  **Interest:** Exact 2-decimal calculation.
+**New Feature:**
+* **PFLR (<15th):** Recovery made before the 15th (Adds to Interest calculation).
+* **PFLR (>15th):** Recovery made after the 15th (Does NOT add to Interest for that month).
+* **Rounding:** Standard Nearest Rupee logic applied.
 """)
 
 # --- Sidebar: Configuration ---
 st.sidebar.header("Configuration")
-start_year = st.sidebar.number_input("Financial Year Start", value=1997, step=1)
-opening_balance_input = st.sidebar.number_input("Opening Balance (April 1st)", min_value=0.0, value=187001.40, step=100.0, format="%.2f")
-rate_input = st.sidebar.number_input("Interest Rate (%)", min_value=0.0, value=12.0, step=0.1, format="%.2f")
+start_year = st.sidebar.number_input("Financial Year Start", value=2024, step=1)
+opening_balance_input = st.sidebar.number_input("Opening Balance (April 1st)", min_value=0.0, value=1624526.0, step=100.0, format="%.2f")
+rate_input = st.sidebar.number_input("Interest Rate (%)", min_value=0.0, value=7.1, step=0.1, format="%.2f")
 
 # --- Helper: Generate Financial Year Months ---
 def get_fy_months(start_year):
@@ -33,61 +34,27 @@ months_list = get_fy_months(start_year)
 
 # --- Main Data Entry ---
 if 'input_data' not in st.session_state:
-    # Initialize Lists
-    dep_before = [0.0] * 12
-    pflr_before = [0.0] * 12
-    dep_after = [0.0] * 12
-    withdrawal = [0.0] * 12
-    
-    # --- HARDCODED MATCHING VALUES ---
-    
-    # 1. Standard Months (Apr - Aug, Nov, Dec, Feb, Mar)
-    # Deposit 2750 (Apr is 2400), PFLR 250
-    dep_before[0] = 2400.0; pflr_before[0] = 250.0 # April
-    for i in range(1, 5): # May - Aug
-        dep_before[i] = 2750.0; pflr_before[i] = 250.0
-    for i in [7, 8]: # Nov, Dec
-        dep_before[i] = 2750.0; pflr_before[i] = 250.0
-    for i in [10, 11]: # Feb, Mar
-        dep_before[i] = 2350.0; pflr_before[i] = 250.0 # Note: Dep drops to 2350 in 1998
-
-    # 2. September (The "Arrear" Fix)
-    # Lowest Balance needs to rise by 3000 (2750+250).
-    # Closing Balance needs to rise by 6000.
-    # Solution: Add 3000 as "Deposit > 15th" (Arrear).
-    dep_before[5] = 2750.0; pflr_before[5] = 250.0
-    dep_after[5] = 3000.0 
-
-    # 3. October (The "Ghost PFLR" Fix)
-    # Ledger shows 250, but Balance doesn't move. We set to 0.
-    dep_before[6] = 0.0; pflr_before[6] = 0.0
-
-    # 4. January (Withdrawal)
-    dep_before[9] = 2350.0; pflr_before[9] = 250.0; withdrawal[9] = 28166.0
-
     data = {
         "Month": months_list,
-        "Dep_Before_15": dep_before,
-        "PFLR_Before_15": pflr_before,
-        "PFLR_After_15": [0.0] * 12,
-        "Dep_After_15": dep_after,
-        "Withdrawal": withdrawal,
+        "Dep_Before_15": [0.0] * 12,
+        "PFLR_Before_15": [0.0] * 12,  # New Column
+        "PFLR_After_15": [0.0] * 12,   # New Column
+        "Dep_After_15": [0.0] * 12,
+        "Withdrawal": [0.0] * 12,
         "Rate": [rate_input] * 12
     }
     st.session_state.input_data = pd.DataFrame(data)
 else:
     st.session_state.input_data["Month"] = months_list
-    # Allow rate updates
-    if st.sidebar.button("Apply Rate to All Rows"):
-         st.session_state.input_data["Rate"] = rate_input
+    st.session_state.input_data["Rate"] = rate_input
 
 edited_df = st.data_editor(
     st.session_state.input_data,
     column_config={
         "Month": st.column_config.TextColumn("Month", disabled=True),
         "Dep_Before_15": st.column_config.NumberColumn("Deposit (<15th)", format="₹ %.2f"),
-        "PFLR_Before_15": st.column_config.NumberColumn("PFLR (<15th)", format="₹ %.2f"),
-        "PFLR_After_15": st.column_config.NumberColumn("PFLR (>15th)", format="₹ %.2f"),
+        "PFLR_Before_15": st.column_config.NumberColumn("PFLR (<15th)", format="₹ %.2f", help="Loan Recovery BEFORE 15th (Earns Interest)"),
+        "PFLR_After_15": st.column_config.NumberColumn("PFLR (>15th)", format="₹ %.2f", help="Loan Recovery AFTER 15th (No Interest)"),
         "Dep_After_15": st.column_config.NumberColumn("Deposit (>15th)", format="₹ %.2f"),
         "Withdrawal": st.column_config.NumberColumn("Withdrawal", format="₹ %.2f"),
         "Rate": st.column_config.NumberColumn("Rate %", format="%.2f")
@@ -112,18 +79,19 @@ def calculate_ledger(opening_bal, input_df):
         withdrawal = row['Withdrawal']
         rate = row['Rate']
 
-        # Logic: Lowest Balance (Matches 1997 PDF logic)
-        # Includes Dep<15 and PFLR<15
+        # --- LOGIC: Lowest Balance ---
+        # Only include items paid BEFORE the 15th
         effective_deposit_for_interest = dep_before + pflr_before
         
         lowest_bal_calc = current_bal + effective_deposit_for_interest - withdrawal
         lowest_bal = max(0, lowest_bal_calc)
 
-        # Logic: Interest (Exact 2 decimals)
+        # --- LOGIC: Interest Rounding (Nearest Rupee) ---
         raw_interest = (lowest_bal * rate) / 1200
-        interest = round(raw_interest, 2)
+        interest = int(raw_interest + 0.5)
 
-        # Logic: Closing Balance
+        # --- LOGIC: Closing Balance ---
+        # Include ALL deposits and PFLR regardless of date
         closing_bal = current_bal + dep_before + dep_after + pflr_before + pflr_after - withdrawal
 
         results.append({
@@ -159,7 +127,7 @@ st.dataframe(result_df.style.format({
     "Dep (>15th)": "₹ {:.2f}",
     "Withdrawal": "₹ {:.2f}",
     "Lowest Balance": "₹ {:.2f}",
-    "Interest": "₹ {:.2f}",
+    "Interest": "₹ {:.0f}",
     "Closing Balance": "₹ {:.2f}"
 }), use_container_width=True)
 
@@ -167,8 +135,8 @@ st.dataframe(result_df.style.format({
 final_balance_with_interest = final_principal + total_yearly_interest
 col1, col2, col3 = st.columns(3)
 col1.metric("Closing Principal", f"₹ {final_principal:,.2f}")
-col2.metric("Total Interest", f"₹ {total_yearly_interest:,.2f}")
-col3.metric("Grand Total", f"₹ {final_balance_with_interest:,.2f}")
+col2.metric("Total Interest", f"₹ {total_yearly_interest:,.0f}")
+col3.metric("Final Balance", f"₹ {final_balance_with_interest:,.2f}")
 
 # --- PDF Export ---
 class PDF(FPDF):
@@ -180,7 +148,7 @@ class PDF(FPDF):
 def to_pdf(df, final_bal, tot_int, year_label):
     pdf = PDF(orientation='L') 
     pdf.add_page()
-    pdf.set_font("Arial", size=7) 
+    pdf.set_font("Arial", size=7) # Smaller font to fit extra columns
     
     # Title
     pdf.cell(0, 10, f"Financial Year: {year_label}-{year_label+1}", 0, 1, 'L')
@@ -204,17 +172,16 @@ def to_pdf(df, final_bal, tot_int, year_label):
         pdf.cell(col_widths[6], 10, f"{row['Withdrawal']:.2f}", 1)
         pdf.cell(col_widths[7], 10, f"{row['Lowest Balance']:.2f}", 1)
         pdf.cell(col_widths[8], 10, str(row['Rate (%)']), 1)
-        pdf.cell(col_widths[9], 10, f"{row['Interest']:.2f}", 1) 
+        pdf.cell(col_widths[9], 10, f"{row['Interest']:.0f}", 1)
         pdf.cell(col_widths[10], 10, f"{row['Closing Balance']:.2f}", 1)
         pdf.ln()
 
     pdf.ln(5)
     pdf.set_font("Arial", 'B', 10)
-    pdf.cell(0, 10, f"Total Interest: {tot_int:,.2f}", 0, 1)
-    pdf.cell(0, 10, f"Closing Principal: {final_bal:,.2f}", 0, 1)
-    pdf.cell(0, 10, f"Grand Total: {final_bal + tot_int:,.2f}", 0, 1)
+    pdf.cell(0, 10, f"Total Interest: {tot_int:,.0f}", 0, 1)
+    pdf.cell(0, 10, f"Final Balance: {final_bal:,.2f}", 0, 1)
     
     return pdf.output(dest='S').encode('latin-1')
 
-pdf_data = to_pdf(result_df, final_principal, total_yearly_interest, start_year)
-st.download_button("📄 Download PDF (Exact Match)", pdf_data, 'PF_Statement_1997.pdf', 'application/pdf')
+pdf_data = to_pdf(result_df, final_balance_with_interest, total_yearly_interest, start_year)
+st.download_button("📄 Download PDF", pdf_data, 'PF_Statement_Final.pdf', 'application/pdf')
