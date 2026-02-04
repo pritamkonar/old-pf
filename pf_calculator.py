@@ -4,21 +4,21 @@ from fpdf import FPDF
 from io import BytesIO
 
 # --- Page Configuration ---
-st.set_page_config(page_title="PF Ledger (Truncation Fix)", layout="wide")
+st.set_page_config(page_title="PF Ledger (Clean)", layout="wide")
 
 st.title("💰 Provident Fund Ledger (Truncation Mode)")
 st.markdown("""
-**Logic Update:**
-* **Interest Calculation:** Now uses **Truncation** instead of Rounding.
-    * *Example:* `2202.549` becomes **`2202.54`** (matches manual calc).
-    * *Previous:* `2202.549` became `2202.55`.
+**Clean Calculator:**
+* All values start at **0**.
+* **Interest:** Uses Truncation logic (e.g., 2202.549 -> 2202.54).
+* **Lowest Balance:** Includes Deposits & PFLR made before the 15th.
 """)
 
 # --- Sidebar: Configuration ---
 st.sidebar.header("Configuration")
-start_year = st.sidebar.number_input("Financial Year Start", value=1997, step=1)
-opening_balance_input = st.sidebar.number_input("Opening Balance (April 1st)", min_value=0.0, value=187001.40, step=100.0, format="%.2f")
-rate_input = st.sidebar.number_input("Interest Rate (%)", min_value=0.0, value=12.0, step=0.1, format="%.2f")
+start_year = st.sidebar.number_input("Financial Year Start", value=2024, step=1)
+opening_balance_input = st.sidebar.number_input("Opening Balance (April 1st)", min_value=0.0, value=0.0, step=100.0, format="%.2f")
+rate_input = st.sidebar.number_input("Interest Rate (%)", min_value=0.0, value=7.1, step=0.1, format="%.2f")
 
 # --- Helper: Generate Financial Year Months ---
 def get_fy_months(start_year):
@@ -32,49 +32,35 @@ def get_fy_months(start_year):
 months_list = get_fy_months(start_year)
 
 # --- Main Data Entry ---
+# Initialize Session State with ZEROS (No pre-filled data)
 if 'input_data' not in st.session_state:
-    # Initialize with 0.0
-    dep_before = [0.0] * 12
-    pflr_before = [0.0] * 12
-    dep_after = [0.0] * 12
-    withdrawal = [0.0] * 12
-    
-    # --- PRE-FILLING DATA (Same as before) ---
-    dep_before[0] = 2400.0; pflr_before[0] = 250.0 
-    for i in range(1, 5): 
-        dep_before[i] = 2750.0; pflr_before[i] = 250.0
-    
-    # Sept Fix
-    dep_before[5] = 2750.0; pflr_before[5] = 250.0 
-    dep_after[5] = 2750.0; 
-    
-    # Oct Fix (Ghost PFLR)
-    # Keeping standard logic unless user changes
-    # dep_before[6] = 2750.0; pflr_before[6] = 250.0 # Defaulting to standard flow
-    
-    # Nov, Dec
-    dep_before[7] = 2750.0; pflr_before[7] = 250.0 
-    dep_before[8] = 2750.0; pflr_before[8] = 250.0 
-    
-    # Jan
-    dep_before[9] = 2350.0; pflr_before[9] = 250.0; withdrawal[9] = 28166.0 
-    
-    # Feb, Mar
-    dep_before[10] = 2350.0; pflr_before[10] = 250.0 
-    dep_before[11] = 2350.0; pflr_before[11] = 250.0 
-
     data = {
         "Month": months_list,
-        "Dep_Before_15": dep_before,
-        "PFLR_Before_15": pflr_before,
-        "PFLR_After_15": [0.0] * 12, 
-        "Dep_After_15": dep_after,
-        "Withdrawal": withdrawal,
+        "Dep_Before_15": [0.0] * 12,
+        "PFLR_Before_15": [0.0] * 12,
+        "PFLR_After_15": [0.0] * 12,
+        "Dep_After_15": [0.0] * 12,
+        "Withdrawal": [0.0] * 12,
         "Rate": [rate_input] * 12
     }
     st.session_state.input_data = pd.DataFrame(data)
 else:
+    # Update Month labels if Year changes
     st.session_state.input_data["Month"] = months_list
+
+# Button to Reset Manually (Optional convenience)
+if st.sidebar.button("Reset All Values to 0"):
+    data = {
+        "Month": months_list,
+        "Dep_Before_15": [0.0] * 12,
+        "PFLR_Before_15": [0.0] * 12,
+        "PFLR_After_15": [0.0] * 12,
+        "Dep_After_15": [0.0] * 12,
+        "Withdrawal": [0.0] * 12,
+        "Rate": [rate_input] * 12
+    }
+    st.session_state.input_data = pd.DataFrame(data)
+    st.rerun()
 
 edited_df = st.data_editor(
     st.session_state.input_data,
@@ -112,11 +98,9 @@ def calculate_ledger(opening_bal, input_df):
         lowest_bal_calc = current_bal + effective_deposit_for_interest - withdrawal
         lowest_bal = max(0, lowest_bal_calc)
 
-        # --- LOGIC UPDATE: Interest Truncation ---
+        # --- LOGIC: Interest Truncation ---
         raw_interest = (lowest_bal * rate) / 1200
-        
-        # PREVIOUS (Rounded Up): 2202.549 -> 2202.55
-        # NEW (Truncated):       2202.549 -> 2202.54
+        # Truncate to 2 decimal places (No Rounding Up)
         interest = int(raw_interest * 100) / 100.0
 
         # Closing Balance
@@ -212,4 +196,4 @@ def to_pdf(df, final_bal, tot_int, year_label):
     return pdf.output(dest='S').encode('latin-1')
 
 pdf_data = to_pdf(result_df, final_balance_with_interest, total_yearly_interest, start_year)
-st.download_button("📄 Download PDF", pdf_data, 'PF_Statement_Truncated.pdf', 'application/pdf')
+st.download_button("📄 Download PDF", pdf_data, 'PF_Statement.pdf', 'application/pdf')
